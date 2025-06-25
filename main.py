@@ -551,8 +551,8 @@ async def handle_incoming_messages(client):
                     await event.reply(ADMIN_NOTE)
                     mark_user_replied(user_id)
                     save_status(f"Sent admin note to user {user_id} (first time in 24h)", "INFO")
-            else:
-                save_status(f"Skipped reply to user {user_id} (already replied in last 24h)", "INFO")
+                else:
+                    save_status(f"Skipped reply to user {user_id} (already replied in last 24h)", "INFO")
         except Exception as e:
             save_status(f"Auto-reply error: {e}", "ERROR")
 
@@ -716,8 +716,8 @@ async def main_loop():
                         jitter = random.randint(5, 30)
                         save_status(f"STOP cleared after break. Waiting {jitter}s", "SUCCESS")
                         await asyncio.sleep(jitter)
-                    continue
-                
+                        continue
+                    
                 # Ensure client is connected before sending
                 if not await ensure_client_connected(client):
                     save_status("Client connection failed, restarting main loop", "ERROR")
@@ -727,7 +727,7 @@ async def main_loop():
                         await asyncio.sleep(900)  # Wait 15 minutes
                         consecutive_connection_failures = 0
                     break
-                
+            
                 interval = get_interval()
                 group_info = group_list[idx % len(group_list)]
                 gid = str(group_info["id"])
@@ -753,7 +753,7 @@ async def main_loop():
                     jitter2 = random.randint(5, 15)
                     save_status(f"Waiting {jitter2}s after sending to {group_info['title']}", "INFO")
                     await asyncio.sleep(jitter2)
-                    
+            
                 except Exception as e:
                     save_status(f"❌ Error sending to {group_info['title']}: {e}", "ERROR")
                     # If it's an authorization error, break the loop to force re-login
@@ -771,8 +771,8 @@ async def main_loop():
                         if not await ensure_client_connected(client):
                             save_status("Reconnection failed, restarting main loop", "ERROR")
                             consecutive_connection_failures += 1
-                            break
-                
+                    break
+            
                 idx += 1
                 # Strict interval: wait exactly interval minutes (no jitter)
                 real_interval = max(1, interval * 60)
