@@ -425,12 +425,27 @@ async def telegram_login():
             if await client.is_user_authorized():
                 save_status("Auto-login successful using saved session", "SUCCESS")
                 return client
-            await client.disconnect()
+            else:
+                save_status("Session expired, clearing and doing fresh login", "WARNING")
+                # Clear the invalid session
+                try:
+                    db.child(FIREBASE_SESSION_PATH).remove()
+                    save_status("Cleared expired session from Firebase", "INFO")
+                except:
+                    pass
+                await client.disconnect()
         except Exception as e:
             save_status(f"Session login failed: {e}", "WARNING")
+            # Clear the invalid session
+            try:
+                db.child(FIREBASE_SESSION_PATH).remove()
+                save_status("Cleared invalid session from Firebase", "INFO")
+            except:
+                pass
             await client.disconnect()
     
-    # No session, do fresh login
+    # No session or session invalid, do fresh login
+    save_status("Starting fresh login process", "INFO")
     client = TelegramClient(StringSession(), API_ID, API_HASH)
     try:
         await client.connect()
@@ -554,6 +569,24 @@ async def wait_until_start():
         save_status("STOP command active. Waiting for resume...", "PAUSED")
         await asyncio.sleep(10)
 
+async def health_check(client):
+    """Perform a health check on the client connection"""
+    try:
+        if not client.is_connected():
+            return False
+        
+        # Try to get account info to test authorization
+        me = await client.get_me()
+        if me:
+            save_status(f"Health check passed - Connected as {me.first_name}", "INFO")
+            return True
+        else:
+            save_status("Health check failed - Could not get account info", "ERROR")
+            return False
+    except Exception as e:
+        save_status(f"Health check failed: {e}", "ERROR")
+        return False
+
 async def ensure_client_connected(client):
     """Ensure client is connected and handle reconnection"""
     try:
@@ -561,12 +594,29 @@ async def ensure_client_connected(client):
             save_status("Client disconnected, attempting reconnection...", "WARNING")
             await client.connect()
             if await client.is_user_authorized():
-                save_status("Reconnection successful", "SUCCESS")
-                return True
+                # Perform health check
+                if await health_check(client):
+                    save_status("Reconnection successful", "SUCCESS")
+                    return True
+                else:
+                    save_status("Reconnection failed - health check failed", "ERROR")
+                    return False
+            else:
+                save_status("Reconnection failed - session expired, will force fresh login", "ERROR")
+                # Clear the invalid session
+                try:
+                    db.child(FIREBASE_SESSION_PATH).remove()
+                    save_status("Cleared invalid session from Firebase", "INFO")
+                except:
+                    pass
+                return False
         else:
-            save_status("Reconnection failed - not authorized", "ERROR")
-            return False
-        return True
+            # Client is connected, perform health check
+            if await health_check(client):
+                return True
+            else:
+                save_status("Connected but health check failed", "ERROR")
+                return False
     except Exception as e:
         save_status(f"Connection check failed: {e}", "ERROR")
         return False
@@ -574,14 +624,42 @@ async def ensure_client_connected(client):
 # --- Main Message Sending Loop ---
 async def main_loop():
     last_sent_promo = {}  # group_id -> last promo index sent
+    consecutive_auth_failures = 0  # Track consecutive auth failures
+    consecutive_connection_failures = 0  # Track connection failures
+    
     while True:
-        client = await telegram_login()
-        if not client:
-            save_status("Could not login. Retrying in 2 minutes", "ERROR")
-            await asyncio.sleep(120)
-            continue
-        
         try:
+            client = await telegram_login()
+            if not client:
+                consecutive_auth_failures += 1
+                if consecutive_auth_failures >= 3:
+                    save_status("Multiple login failures. Clearing session and waiting 10 minutes", "ERROR")
+                    try:
+                        db.child(FIREBASE_SESSION_PATH).remove()
+                    except:
+                        pass
+                    consecutive_auth_failures = 0
+                    consecutive_connection_failures = 0
+                    await asyncio.sleep(600)  # Wait 10 minutes
+                else:
+                    save_status(f"Could not login. Retrying in 5 minutes (attempt {consecutive_auth_failures})", "ERROR")
+                    await asyncio.sleep(300)  # Wait 5 minutes
+                continue
+            
+            # Reset failure counters on successful login
+            consecutive_auth_failures = 0
+            consecutive_connection_failures = 0
+            
+            # Test connection immediately after login
+            if not await ensure_client_connected(client):
+                save_status("Initial connection test failed, restarting login process", "ERROR")
+                consecutive_connection_failures += 1
+                if consecutive_connection_failures >= 2:
+                    save_status("Multiple connection failures. Waiting 10 minutes before retry", "ERROR")
+                    await asyncio.sleep(600)
+                    consecutive_connection_failures = 0
+                continue
+            
             # Start message handler
             await handle_incoming_messages(client)
             
@@ -638,13 +716,18 @@ async def main_loop():
                         jitter = random.randint(5, 30)
                         save_status(f"STOP cleared after break. Waiting {jitter}s", "SUCCESS")
                         await asyncio.sleep(jitter)
-                        continue
-                    
+                    continue
+                
                 # Ensure client is connected before sending
                 if not await ensure_client_connected(client):
                     save_status("Client connection failed, restarting main loop", "ERROR")
+                    consecutive_connection_failures += 1
+                    if consecutive_connection_failures >= 3:
+                        save_status("Multiple connection failures. Waiting 15 minutes before retry", "ERROR")
+                        await asyncio.sleep(900)  # Wait 15 minutes
+                        consecutive_connection_failures = 0
                     break
-            
+                
                 interval = get_interval()
                 group_info = group_list[idx % len(group_list)]
                 gid = str(group_info["id"])
@@ -670,16 +753,26 @@ async def main_loop():
                     jitter2 = random.randint(5, 15)
                     save_status(f"Waiting {jitter2}s after sending to {group_info['title']}", "INFO")
                     await asyncio.sleep(jitter2)
-            
+                    
                 except Exception as e:
                     save_status(f"❌ Error sending to {group_info['title']}: {e}", "ERROR")
+                    # If it's an authorization error, break the loop to force re-login
+                    if "authorized" in str(e).lower() or "session" in str(e).lower():
+                        save_status("Authorization error detected, forcing fresh login", "ERROR")
+                        try:
+                            db.child(FIREBASE_SESSION_PATH).remove()
+                            save_status("Cleared invalid session", "INFO")
+                        except:
+                            pass
+                        break
                     # If it's a disconnection error, try to reconnect
-                    if "disconnected" in str(e).lower():
+                    elif "disconnected" in str(e).lower():
                         save_status("Detected disconnection, attempting reconnection", "WARNING")
                         if not await ensure_client_connected(client):
                             save_status("Reconnection failed, restarting main loop", "ERROR")
+                            consecutive_connection_failures += 1
                             break
-            
+                
                 idx += 1
                 # Strict interval: wait exactly interval minutes (no jitter)
                 real_interval = max(1, interval * 60)
@@ -688,15 +781,27 @@ async def main_loop():
                 
         except Exception as e:
             save_status(f"Main loop error: {e}", "ERROR")
-            await asyncio.sleep(60)
+            # If it's an authorization error, clear session
+            if "authorized" in str(e).lower() or "session" in str(e).lower():
+                try:
+                    db.child(FIREBASE_SESSION_PATH).remove()
+                    save_status("Cleared invalid session due to error", "INFO")
+                except:
+                    pass
+            consecutive_connection_failures += 1
+            if consecutive_connection_failures >= 5:
+                save_status("Too many consecutive failures. Waiting 20 minutes before retry", "ERROR")
+                await asyncio.sleep(1200)  # Wait 20 minutes
+                consecutive_connection_failures = 0
+            else:
+                await asyncio.sleep(120)  # Wait 2 minutes
         finally:
             try:
                 await client.disconnect()
             except:
                 pass
-            await asyncio.sleep(10)
+            await asyncio.sleep(30)  # Wait 30 seconds before next attempt
 
 if __name__ == "__main__":
     ensure_firebase_defaults()
     asyncio.run(main_loop())
-
