@@ -91,6 +91,7 @@ def get_next_active_delay():
         (14*60+30, 17*60, 'active'),
         (17*60, 17*60+20, 'tea'),
         (17*60+20, 25*60, 'active'),  # 25*60 = 1:00 AM next day
+        (25*60, 29*60, 'active'),     # 1:00 AM – 5:00 AM
         (29*60, 33*60, 'sleep'),      # 5:00 AM – 9:00 AM (next day)
     ]
     # Adjust for after midnight
