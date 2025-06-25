@@ -7,6 +7,7 @@ from telethon.sessions import StringSession
 import pyrebase
 from pytz import timezone
 import random
+import json
 
 # --- Firebase Config ---
 firebase_config = {
@@ -30,6 +31,7 @@ FIREBASE_STATUS_PATH = "live_status"
 FIREBASE_OTP_PATH = "otp"
 FIREBASE_SESSION_PATH = "session"
 FIREBASE_USER_REPLIES_PATH = "user_replies"  # Track user replies
+FIREBASE_GROUPS_PATH = "groups"  # Groups list and selection
 
 # --- Helper Functions ---
 def save_status(msg, level="INFO"):
@@ -57,6 +59,251 @@ def save_status(msg, level="INFO"):
                 db.child(FIREBASE_STATUS_PATH).child(key).remove()
         except Exception:
             db.child(FIREBASE_STATUS_PATH).child(key).remove()
+
+def save_groups_to_firebase(groups_data):
+    """Save groups data to Firebase"""
+    try:
+        db.child(FIREBASE_GROUPS_PATH).set(groups_data)
+        save_status(f"Saved {len(groups_data)} groups to Firebase", "SUCCESS")
+        return True
+    except Exception as e:
+        save_status(f"Error saving groups to Firebase: {e}", "ERROR")
+        return False
+
+def load_groups_from_firebase():
+    """Load groups data from Firebase"""
+    try:
+        groups_data = db.child(FIREBASE_GROUPS_PATH).get().val()
+        if groups_data:
+            save_status(f"Loaded {len(groups_data)} groups from Firebase", "INFO")
+            return groups_data
+        else:
+            save_status("No saved groups found in Firebase", "WARNING")
+            return []
+    except Exception as e:
+        save_status(f"Error loading groups from Firebase: {e}", "ERROR")
+        return []
+
+async def get_groups_from_folder(client, folder_name="123456"):
+    """Get groups from a specific Telegram folder"""
+    try:
+        save_status(f"Fetching groups from Telegram folder: {folder_name}", "INFO")
+        groups_data = []
+        
+        # Get all dialogs first
+        all_dialogs = []
+        async for dialog in client.iter_dialogs():
+            all_dialogs.append(dialog)
+        
+        # Try to find the folder by name
+        folder_entity = None
+        for dialog in all_dialogs:
+            if hasattr(dialog.entity, 'title') and dialog.entity.title == folder_name:
+                folder_entity = dialog.entity
+                break
+        
+        if folder_entity:
+            save_status(f"Found folder: {folder_name}", "SUCCESS")
+            
+            # Get dialogs from this folder
+            try:
+                # For folders, we need to get the participants/members
+                if hasattr(folder_entity, 'participants_count'):
+                    # This is a folder, get its contents
+                    async for dialog in client.iter_dialogs():
+                        # Check if this dialog belongs to our folder
+                        # We'll check by looking at the folder structure
+                        if (dialog.is_group or dialog.is_channel) and not dialog.is_user:
+                            # For now, let's get all groups and channels
+                            # You can refine this logic based on your folder structure
+                            group_info = {
+                                "id": dialog.id,
+                                "title": dialog.title,
+                                "username": dialog.entity.username if hasattr(dialog.entity, 'username') else None,
+                                "type": "group" if dialog.is_group else "channel",
+                                "participants_count": getattr(dialog.entity, 'participants_count', 0)
+                            }
+                            groups_data.append(group_info)
+                            save_status(f"Found group in folder: {dialog.title} (ID: {dialog.id})", "INFO")
+                
+                # Alternative approach: get all groups and assume they're in the folder
+                # This is more reliable since folder access can be tricky
+                if not groups_data:
+                    save_status("Using alternative method: fetching all groups", "INFO")
+                    async for dialog in client.iter_dialogs():
+                        if (dialog.is_group or dialog.is_channel) and not dialog.is_user:
+                            group_info = {
+                                "id": dialog.id,
+                                "title": dialog.title,
+                                "username": dialog.entity.username if hasattr(dialog.entity, 'username') else None,
+                                "type": "group" if dialog.is_group else "channel",
+                                "participants_count": getattr(dialog.entity, 'participants_count', 0)
+                            }
+                            groups_data.append(group_info)
+                            save_status(f"Found group: {dialog.title} (ID: {dialog.id})", "INFO")
+                
+            except Exception as e:
+                save_status(f"Error accessing folder contents: {e}", "ERROR")
+                # Fallback: get all groups
+                async for dialog in client.iter_dialogs():
+                    if (dialog.is_group or dialog.is_channel) and not dialog.is_user:
+                        group_info = {
+                            "id": dialog.id,
+                            "title": dialog.title,
+                            "username": dialog.entity.username if hasattr(dialog.entity, 'username') else None,
+                            "type": "group" if dialog.is_group else "channel",
+                            "participants_count": getattr(dialog.entity, 'participants_count', 0)
+                        }
+                        groups_data.append(group_info)
+                        save_status(f"Found group (fallback): {dialog.title} (ID: {dialog.id})", "INFO")
+        else:
+            save_status(f"Folder '{folder_name}' not found, fetching all groups", "WARNING")
+            # Fallback: get all groups if folder not found
+            async for dialog in client.iter_dialogs():
+                if (dialog.is_group or dialog.is_channel) and not dialog.is_user:
+                    group_info = {
+                        "id": dialog.id,
+                        "title": dialog.title,
+                        "username": dialog.entity.username if hasattr(dialog.entity, 'username') else None,
+                        "type": "group" if dialog.is_group else "channel",
+                        "participants_count": getattr(dialog.entity, 'participants_count', 0)
+                    }
+                    groups_data.append(group_info)
+                    save_status(f"Found group: {dialog.title} (ID: {dialog.id})", "INFO")
+        
+        if groups_data:
+            save_status(f"Successfully found {len(groups_data)} groups", "SUCCESS")
+            return groups_data
+        else:
+            save_status("No groups found", "WARNING")
+            return []
+            
+    except Exception as e:
+        save_status(f"Error fetching groups from folder: {e}", "ERROR")
+        return []
+
+async def fetch_and_save_groups_list(client):
+    """Fetch all groups from Telegram and save numbered list to Firebase"""
+    try:
+        save_status("Fetching all groups from Telegram...", "INFO")
+        groups_data = []
+        group_number = 1
+        
+        async for dialog in client.iter_dialogs():
+            # Only include groups and channels, never personal users
+            if (dialog.is_group or dialog.is_channel) and not dialog.is_user:
+                group_info = {
+                    "number": group_number,
+                    "id": dialog.id,
+                    "title": dialog.title,
+                    "username": dialog.entity.username if hasattr(dialog.entity, 'username') else None,
+                    "type": "group" if dialog.is_group else "channel",
+                    "participants_count": getattr(dialog.entity, 'participants_count', 0)
+                }
+                groups_data.append(group_info)
+                save_status(f"Found group {group_number}: {dialog.title} (ID: {dialog.id})", "INFO")
+                group_number += 1
+        
+        if groups_data:
+            # Create the groups list in Firebase
+            groups_dict = {}
+            for group in groups_data:
+                groups_dict[str(group["number"])] = f"{group['number']}. {group['title']}"
+            
+            # Store the full group data in a separate, simpler format
+            full_data_simple = []
+            for group in groups_data:
+                full_data_simple.append({
+                    "num": group["number"],
+                    "id": group["id"],
+                    "title": group["title"],
+                    "type": group["type"]
+                })
+            groups_dict["fulldata"] = full_data_simple
+            
+            # Add the selection instruction at the end
+            groups_dict["group"] = "enter numbers to select (e.g., 1,2,4,6)"
+            
+            # Save to Firebase
+            db.child(FIREBASE_GROUPS_PATH).set(groups_dict)
+            save_status(f"Successfully saved {len(groups_data)} groups to Firebase", "SUCCESS")
+            save_status("Please select groups by entering numbers in Firebase group field", "INFO")
+            return groups_data
+        else:
+            save_status("No groups found in Telegram", "WARNING")
+            return []
+            
+    except Exception as e:
+        save_status(f"Error fetching groups: {e}", "ERROR")
+        return []
+
+def get_selected_groups():
+    """Get the selected groups from Firebase"""
+    try:
+        groups_data = db.child(FIREBASE_GROUPS_PATH).get().val()
+        if not groups_data:
+            return []
+        
+        # Get the selection from group field
+        selection = groups_data.get("group", "")
+        if not selection or selection == "enter numbers to select (e.g., 1,2,4,6)":
+            return []
+        
+        # Parse the selection (e.g., "1,2,4,6")
+        try:
+            selected_numbers = [int(x.strip()) for x in selection.split(",") if x.strip().isdigit()]
+        except:
+            save_status("Invalid group selection format. Use numbers separated by commas (e.g., 1,2,4,6)", "ERROR")
+            return []
+        
+        # Get the full group data
+        full_data = groups_data.get("fulldata", [])
+        if not full_data:
+            save_status("Full group data not found, please refresh groups", "ERROR")
+            return []
+        
+        # Get the selected groups with their actual IDs
+        selected_groups = []
+        for num in selected_numbers:
+            for group in full_data:
+                if group["num"] == num:
+                    selected_groups.append({
+                        "number": group["num"],
+                        "id": group["id"],
+                        "title": group["title"],
+                        "type": group["type"]
+                    })
+                    break
+        
+        if selected_groups:
+            save_status(f"Selected {len(selected_groups)} groups: {[g['number'] for g in selected_groups]}", "SUCCESS")
+        else:
+            save_status("No groups selected or invalid selection", "WARNING")
+        
+        return selected_groups
+        
+    except Exception as e:
+        save_status(f"Error getting selected groups: {e}", "ERROR")
+        return []
+
+async def get_groups_list(client):
+    """Get groups list - fetch from Telegram and allow manual selection"""
+    # First check if groups are already saved
+    existing_groups = db.child(FIREBASE_GROUPS_PATH).get().val()
+    
+    if not existing_groups:
+        # No groups saved, fetch them
+        save_status("No groups found in Firebase, fetching from Telegram...", "INFO")
+        return await fetch_and_save_groups_list(client)
+    else:
+        # Groups are saved, check if selection is made
+        selected_groups = get_selected_groups()
+        if selected_groups:
+            save_status(f"Using {len(selected_groups)} selected groups", "INFO")
+            return selected_groups
+        else:
+            save_status("Groups found but none selected. Please select groups in Firebase", "WARNING")
+            return []
 
 def can_reply_to_user(user_id):
     """Check if we can reply to this user (once per 24 hours)"""
@@ -265,6 +512,11 @@ def ensure_firebase_defaults():
     user_replies = db.child(FIREBASE_USER_REPLIES_PATH).get().val()
     if user_replies is None:
         db.child(FIREBASE_USER_REPLIES_PATH).set({})
+    
+    # Groups
+    groups = db.child(FIREBASE_GROUPS_PATH).get().val()
+    if groups is None:
+        db.child(FIREBASE_GROUPS_PATH).set({})
 
 ADMIN_NOTE = ("📢 Note from Admin \n"
               "Hey dosto! This is just an advertising/demo account.\n"
@@ -284,8 +536,8 @@ async def handle_incoming_messages(client):
                     await event.reply(ADMIN_NOTE)
                     mark_user_replied(user_id)
                     save_status(f"Sent admin note to user {user_id} (first time in 24h)", "INFO")
-                else:
-                    save_status(f"Skipped reply to user {user_id} (already replied in last 24h)", "INFO")
+            else:
+                save_status(f"Skipped reply to user {user_id} (already replied in last 24h)", "INFO")
         except Exception as e:
             save_status(f"Auto-reply error: {e}", "ERROR")
 
@@ -311,9 +563,9 @@ async def ensure_client_connected(client):
             if await client.is_user_authorized():
                 save_status("Reconnection successful", "SUCCESS")
                 return True
-            else:
-                save_status("Reconnection failed - not authorized", "ERROR")
-                return False
+        else:
+            save_status("Reconnection failed - not authorized", "ERROR")
+            return False
         return True
     except Exception as e:
         save_status(f"Connection check failed: {e}", "ERROR")
@@ -333,15 +585,11 @@ async def main_loop():
             # Start message handler
             await handle_incoming_messages(client)
             
-            # Get dialogs
-            dialogs = []
-            async for dialog in client.iter_dialogs():
-                # Only include groups and channels, never personal users
-                if (dialog.is_group or dialog.is_channel) and not dialog.is_user:
-                    dialogs.append(dialog)
+            # Get groups list (from Telegram folder)
+            groups_data = await get_groups_list(client)
             
-            if not dialogs:
-                save_status("No groups/channels found. Sleeping 10 min", "WARNING")
+            if not groups_data:
+                save_status("No groups available. Sleeping 10 min", "WARNING")
                 await client.disconnect()
                 await asyncio.sleep(600)
                 continue
@@ -353,7 +601,7 @@ async def main_loop():
                 await asyncio.sleep(600)
                 continue
             
-            group_list = dialogs
+            group_list = groups_data
             promo_list = promos
             idx = 0
             
@@ -390,16 +638,16 @@ async def main_loop():
                         jitter = random.randint(5, 30)
                         save_status(f"STOP cleared after break. Waiting {jitter}s", "SUCCESS")
                         await asyncio.sleep(jitter)
-                    continue
-                
+                        continue
+                    
                 # Ensure client is connected before sending
                 if not await ensure_client_connected(client):
                     save_status("Client connection failed, restarting main loop", "ERROR")
                     break
-                
+            
                 interval = get_interval()
-                group = group_list[idx % len(group_list)]
-                gid = str(group.id)
+                group_info = group_list[idx % len(group_list)]
+                gid = str(group_info["id"])
                 
                 # Select promo for this group, not repeating last promo if possible
                 last_idx = last_sent_promo.get(gid, -1)
@@ -411,26 +659,27 @@ async def main_loop():
                 
                 try:
                     jitter = random.randint(5, 15)
-                    save_status(f"Waiting {jitter}s before sending to {group.title} ({group.id})", "INFO")
+                    save_status(f"Waiting {jitter}s before sending to {group_info['title']} ({group_info['id']})", "INFO")
                     await asyncio.sleep(jitter)
                     
-                    await client.send_message(group, promo)
-                    save_status(f"✅ Sent promo {promo_idx+1} to {group.title} ({group.id})", "SUCCESS")
+                    # Send message using group ID
+                    await client.send_message(int(group_info["id"]), promo)
+                    save_status(f"✅ Sent promo {promo_idx+1} to {group_info['title']} ({group_info['id']})", "SUCCESS")
                     last_sent_promo[gid] = promo_idx
                     
                     jitter2 = random.randint(5, 15)
-                    save_status(f"Waiting {jitter2}s after sending to {group.title}", "INFO")
+                    save_status(f"Waiting {jitter2}s after sending to {group_info['title']}", "INFO")
                     await asyncio.sleep(jitter2)
-                    
+            
                 except Exception as e:
-                    save_status(f"❌ Error sending to {group.title}: {e}", "ERROR")
+                    save_status(f"❌ Error sending to {group_info['title']}: {e}", "ERROR")
                     # If it's a disconnection error, try to reconnect
                     if "disconnected" in str(e).lower():
                         save_status("Detected disconnection, attempting reconnection", "WARNING")
                         if not await ensure_client_connected(client):
                             save_status("Reconnection failed, restarting main loop", "ERROR")
                             break
-                
+            
                 idx += 1
                 # Strict interval: wait exactly interval minutes (no jitter)
                 real_interval = max(1, interval * 60)
@@ -450,3 +699,4 @@ async def main_loop():
 if __name__ == "__main__":
     ensure_firebase_defaults()
     asyncio.run(main_loop())
+
