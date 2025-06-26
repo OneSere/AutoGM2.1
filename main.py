@@ -626,6 +626,8 @@ async def main_loop():
     last_sent_promo = {}  # group_id -> last promo index sent
     consecutive_auth_failures = 0  # Track consecutive auth failures
     consecutive_connection_failures = 0  # Track connection failures
+    group_idx = 0  # Track which group to message next
+    promo_idx = 0  # Track which promo to send next
     
     while True:
         try:
@@ -681,9 +683,10 @@ async def main_loop():
             
             group_list = groups_data
             promo_list = promos
-            idx = 0
+            group_count = len(group_list)
+            promo_count = len(promo_list)
             
-            save_status(f"Starting message loop with {len(group_list)} groups and {len(promo_list)} promos", "INFO")
+            save_status(f"Starting message loop with {group_count} groups and {promo_count} promos", "INFO")
             
             while True:
                 # Always check start/stop system before sending
@@ -717,7 +720,7 @@ async def main_loop():
                         save_status(f"STOP cleared after break. Waiting {jitter}s", "SUCCESS")
                         await asyncio.sleep(jitter)
                         continue
-                    
+                
                 # Ensure client is connected before sending
                 if not await ensure_client_connected(client):
                     save_status("Client connection failed, restarting main loop", "ERROR")
@@ -727,19 +730,12 @@ async def main_loop():
                         await asyncio.sleep(900)  # Wait 15 minutes
                         consecutive_connection_failures = 0
                     break
-            
+                
                 interval = get_interval()
-                group_info = group_list[idx % len(group_list)]
+                # Send to one group per interval, round-robin
+                group_info = group_list[group_idx % group_count]
+                promo = promo_list[promo_idx % promo_count]
                 gid = str(group_info["id"])
-                
-                # Select promo for this group, not repeating last promo if possible
-                last_idx = last_sent_promo.get(gid, -1)
-                available_indices = [i for i in range(len(promo_list)) if i != last_idx]
-                if not available_indices:
-                    available_indices = list(range(len(promo_list)))
-                promo_idx = available_indices[idx % len(available_indices)]
-                promo = promo_list[promo_idx]
-                
                 try:
                     jitter = random.randint(5, 15)
                     save_status(f"Waiting {jitter}s before sending to {group_info['title']} ({group_info['id']})", "INFO")
@@ -753,7 +749,6 @@ async def main_loop():
                     jitter2 = random.randint(5, 15)
                     save_status(f"Waiting {jitter2}s after sending to {group_info['title']}", "INFO")
                     await asyncio.sleep(jitter2)
-            
                 except Exception as e:
                     save_status(f"❌ Error sending to {group_info['title']}: {e}", "ERROR")
                     # If it's an authorization error, break the loop to force re-login
@@ -772,13 +767,13 @@ async def main_loop():
                             save_status("Reconnection failed, restarting main loop", "ERROR")
                             consecutive_connection_failures += 1
                     break
-            
-                idx += 1
-                # Strict interval: wait exactly interval minutes (no jitter)
+                # Move to next group and promo for next interval
+                group_idx = (group_idx + 1) % group_count
+                promo_idx = (promo_idx + 1) % promo_count
+                # Wait interval before next message
                 real_interval = max(1, interval * 60)
                 save_status(f"⏰ Waiting {real_interval//60}m {real_interval%60}s before next message", "INFO")
                 await asyncio.sleep(real_interval)
-                
         except Exception as e:
             save_status(f"Main loop error: {e}", "ERROR")
             # If it's an authorization error, clear session
