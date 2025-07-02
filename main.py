@@ -22,9 +22,9 @@ firebase_config = {
 firebase = pyrebase.initialize_app(firebase_config)
 db = firebase.database()
 
-API_ID = 25843334
-API_HASH = "e752bb9ebc151b7e36741d7ead8e4fd0"
-PHONE = "+919771565015"  # The phone number to login
+API_ID = 24384486
+API_HASH = "ea089ed3d3e4b093939fa3eab6d062df"
+PHONE = "+919351044618"  # The phone number to login
 FIREBASE_PROMOS_PATH = "promos"
 FIREBASE_INTERVAL_PATH = "interval"
 FIREBASE_STATUS_PATH = "live_status"
